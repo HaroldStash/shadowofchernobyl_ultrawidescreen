@@ -6,6 +6,19 @@ Everything is implemented via clean binary hooks in `bin\xrGame.dll` and `bin\XR
 
 ---
 
+## Screenshots (`5120×1440`, 32:9 Super-Ultrawide)
+
+### In-Game HUD — Full 32:9 3D World with Centered 16:9 HUD & Crosshair
+![In-game HUD at 5120x1440](docs/images/1.png)
+
+### PDA & Map — Unstretched Chassis, Crisp Text, Scissor Clipping & Map Markers
+![PDA and Map UI at 5120x1440](docs/images/2.png)
+
+### NPC Dialog — Centered Portraits, Text Wrapping, Scrollbar & Cursor Proportions
+![NPC Dialog UI at 5120x1440](docs/images/3.png)
+
+---
+
 ## Why the Vanilla Game Breaks on Ultrawide (and Why Hex FOV Patchers Don't Help)
 
 The 3D renderer in X-Ray 1.0006 is already **Hor+** (`CCameraManager::ApplyDevice` fixes vertical FOV and computes `mProject._11 = fASPECT * _22`), so 3D geometry renders natively at `32:9` without stretching.
