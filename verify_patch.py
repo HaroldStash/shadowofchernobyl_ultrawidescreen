@@ -178,15 +178,26 @@ def main():
         (0x00484FA0, 6, "Init WS_POPUP + DPIAware"),
         (0x0048B591, 5, "SetWindowLongA WS_POPUP"),
         (0x0048B60D, 5, "AdjustWindowRect WS_POPUP"),
+        (0x00424E39, 34, "CInput::OnAppActivate"),
+        (0x00424F48, 34, "CInput::OnAppDeactivate"),
+        (0x00425033, 30, "CInput::OnFrame active gate"),
+        (0x00484192, 8, "OnWM_Activate HideCursor"),
+        (0x004841A7, 8, "OnWM_Activate Show+Unlock"),
     ]
     ok_sites_exe = verify_callsites(pe_exe, exe_sites, rev_exe)
 
     # Verify embedded borderless strings & flags in .uwld
     s_u32 = pe_exe.read_va(uwld_va + patcher.LD_OFF_STR_USER32, 11)
     s_dpi = pe_exe.read_va(uwld_va + patcher.LD_OFF_STR_SETDPI, 19)
+    s_clip = pe_exe.read_va(uwld_va + patcher.LD_OFF_STR_CLIPCURSOR, 11)
     ld_flags = struct.unpack("<I", pe_exe.read_va(uwld_va + patcher.LD_OFF_FLAGS, 4))[0]
-    ok_ld_data = (s_u32 == b"user32.dll\x00" and s_dpi == b"SetProcessDPIAware\x00" and ld_flags == 3)
-    print(f"\n  [{'PASS' if ok_ld_data else 'FAIL'}] .uwld data block: flags=0x{ld_flags:x}, strings=({s_u32!r}, {s_dpi!r})")
+    ok_ld_data = (
+        s_u32 == b"user32.dll\x00"
+        and s_dpi == b"SetProcessDPIAware\x00"
+        and s_clip == b"ClipCursor\x00"
+        and ld_flags == 3
+    )
+    print(f"\n  [{'PASS' if ok_ld_data else 'FAIL'}] .uwld data block: flags=0x{ld_flags:x}, strings=({s_u32!r}, {s_dpi!r}, {s_clip!r})")
 
     # Test Win32 PE loader acceptance in a temp directory
     print("\n=== Win32 PE Loader Check ===")

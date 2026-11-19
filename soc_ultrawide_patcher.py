@@ -82,26 +82,34 @@ FN_STATIC_RENDER    = 0x103F3430  # CUIStaticItem::Render()
 FN_DIALOGS_RENDER   = 0x103B9420  # CDialogHolder::DoRenderDialogs()
 
 # Data block layout at start of .uwld section in XR_3DA.exe
-LD_OFF_OFFSET_X     = 0x00  # float: loading screen horizontal offset
-LD_OFF_1024         = 0x04  # float: 1024.0
-LD_OFF_HALF         = 0x08  # float: 0.5
-LD_OFF_EPS          = 0x0C  # float: 0.01
-LD_OFF_MAGIC        = 0x10  # 8 bytes: "UWLDv1.0"
-LD_OFF_FLAGS        = 0x18  # u32: bit0=load_screen, bit1=borderless
-LD_OFF_STR_USER32   = 0x20  # char[16]: "user32.dll\0"
-LD_OFF_STR_SETDPI   = 0x30  # char[24]: "SetProcessDPIAware\0"
-LD_DATA_SIZE        = 0x50
+LD_OFF_OFFSET_X       = 0x00  # float: loading screen horizontal offset
+LD_OFF_1024           = 0x04  # float: 1024.0
+LD_OFF_HALF           = 0x08  # float: 0.5
+LD_OFF_EPS            = 0x0C  # float: 0.01
+LD_OFF_MAGIC          = 0x10  # 8 bytes: "UWLDv1.0"
+LD_OFF_FLAGS          = 0x18  # u32: bit0=load_screen, bit1=borderless
+LD_OFF_FN_CLIPCURSOR  = 0x1C  # u32: resolved user32!ClipCursor pointer
+LD_OFF_STR_USER32     = 0x20  # char[16]: "user32.dll\0"
+LD_OFF_STR_SETDPI     = 0x30  # char[24]: "SetProcessDPIAware\0"
+LD_OFF_STR_CLIPCURSOR = 0x48  # char[16]: "ClipCursor\0"
+LD_DATA_SIZE          = 0x60
 
 LD_FLAG_LOAD_SCREEN = 0x01
 LD_FLAG_BORDERLESS  = 0x02
 
 # XR_3DA.exe known static VAs (ImageBase = 0x00400000)
-XR3DA_IB            = 0x00400000
-XR3DA_DEV_W         = 0x0050BD88  # Device.dwWidth
-XR3DA_DEV_H         = 0x0050BD8C  # Device.dwHeight
-XR3DA_HW_PDEVICE    = 0x0050BFF0  # IDirect3DDevice9* HW.pDevice
-XR3DA_IAT_GETMOD    = 0x004CC058  # KERNEL32.dll!GetModuleHandleA
-XR3DA_IAT_GETPROC   = 0x004CC08C  # KERNEL32.dll!GetProcAddress
+XR3DA_IB              = 0x00400000
+XR3DA_DEV_HWND        = 0x0050BD78  # HWND Device.m_hWnd
+XR3DA_DEV_W           = 0x0050BD88  # Device.dwWidth
+XR3DA_DEV_H           = 0x0050BD8C  # Device.dwHeight
+XR3DA_DEV_ACTIVE      = 0x0050BD9C  # BOOL Device.b_is_Active
+XR3DA_INPUT_EXCL      = 0x00508FE4  # bool g_bExclusiveInput
+XR3DA_HW_PDEVICE      = 0x0050BFF0  # IDirect3DDevice9* HW.pDevice
+XR3DA_IAT_GETMOD      = 0x004CC058  # KERNEL32.dll!GetModuleHandleA
+XR3DA_IAT_GETPROC     = 0x004CC08C  # KERNEL32.dll!GetProcAddress
+XR3DA_IAT_SHOWCURSOR  = 0x004CC32C  # USER32.dll!ShowCursor
+XR3DA_FN_KEYUPDATE    = 0x004243B0  # CInput::KeyUpdate
+XR3DA_FN_MOUSEUPDATE  = 0x004246A0  # CInput::MouseUpdate
 
 
 # =============================================================================
@@ -361,6 +369,7 @@ class Asm:
     def jbe(self, target): self._rel32(b"\x0F\x86", target)
     def ja(self, target): self._rel32(b"\x0F\x87", target)
     def jle(self, target): self._rel32(b"\x0F\x8E", target)
+    def jl(self, target): self._rel32(b"\x0F\x8C", target)
     def jge(self, target): self._rel32(b"\x0F\x8D", target)
 
     # --- PIC base helper (sets reg = runtime base_va, preserves ALL other regs & flags!) ---
@@ -1175,8 +1184,10 @@ def build_uwld_section(
     struct.pack_into("<I", data, LD_OFF_FLAGS, flags)
     s_user32 = b"user32.dll\x00"
     s_setdpi = b"SetProcessDPIAware\x00"
+    s_clip = b"ClipCursor\x00"
     data[LD_OFF_STR_USER32:LD_OFF_STR_USER32 + len(s_user32)] = s_user32
     data[LD_OFF_STR_SETDPI:LD_OFF_STR_SETDPI + len(s_setdpi)] = s_setdpi
+    data[LD_OFF_STR_CLIPCURSOR:LD_OFF_STR_CLIPCURSOR + len(s_clip)] = s_clip
     a.raw(bytes(data))
 
     a.align(16)
@@ -1245,8 +1256,8 @@ def build_uwld_section(
     a.ret()
 
     # Hook_Borderless_Init (replaces 6-byte `mov dword ptr [esi], 0x00c00000` at 0x00484FA0)
-    # Sets initial window style to WS_POPUP (0x80000000) and calls user32!SetProcessDPIAware()
-    # so borderless fullscreen maps 1:1 to physical pixels even when Windows DPI scaling > 100%.
+    # Sets initial window style to WS_POPUP (0x80000000), calls user32!SetProcessDPIAware(),
+    # and resolves user32!ClipCursor for clean Alt+Tab mouse release across multi-monitor setups.
     a.align(16)
     a.label("Hook_Borderless_Init")
     a.mov_mem_imm32(ESI, 0, 0x80000000)
@@ -1258,16 +1269,171 @@ def build_uwld_section(
     a.call_mem(EBX, XR3DA_IAT_GETMOD - uwld_va)   # GetModuleHandleA("user32.dll")
     a.test_rr(EAX, EAX)
     a.je("bi_done")
+    a.mov_rr(EDI, EAX)                             # save hUser32 across stdcall
+    # 1) SetProcessDPIAware()
     a.lea_r_mem(EDX, EBX, LD_OFF_STR_SETDPI)
     a.push_r(EDX)
-    a.push_r(EAX)
+    a.push_r(EDI)
     a.call_mem(EBX, XR3DA_IAT_GETPROC - uwld_va)  # GetProcAddress(hUser32, "SetProcessDPIAware")
     a.test_rr(EAX, EAX)
-    a.je("bi_done")
+    a.je("bi_clip")
     a.call_r(EAX)                                  # SetProcessDPIAware()
+    # 2) Cache user32!ClipCursor
+    a.label("bi_clip")
+    a.lea_r_mem(EDX, EBX, LD_OFF_STR_CLIPCURSOR)
+    a.push_r(EDX)
+    a.push_r(EDI)
+    a.call_mem(EBX, XR3DA_IAT_GETPROC - uwld_va)  # GetProcAddress(hUser32, "ClipCursor")
+    a.mov_mem_r(EBX, LD_OFF_FN_CLIPCURSOR, EAX)
     a.label("bi_done")
     a.popad()
     a.popfd()
+    a.ret()
+
+    # Hook_Borderless_Deactivate (replaces 34 bytes at 0x00424F48 in CInput::OnAppDeactivate)
+    # Entry: esi = CInput + 0x08 -> [esi+8]=pMouse, [esi+0xc]=pKeyboard
+    # Unacquires both DirectInput devices, switches them to DISCL_NONEXCLUSIVE | DISCL_FOREGROUND
+    # so dinput8 immediately drops exclusive cursor capture, and calls ClipCursor(NULL).
+    a.align(16)
+    a.label("Hook_Borderless_Deactivate")
+    a.push_r(EBX)
+    a.push_r(EDI)
+    a.emit_pic_base(EBX, "ld_pic")
+    for idx, dev_off in enumerate((0x08, 0x0C)):
+        skip_lbl = f"bd_skip_{idx}"
+        a.mov_r_mem(EDI, ESI, dev_off)
+        a.test_rr(EDI, EDI)
+        a.je(skip_lbl)
+        # dev->Unacquire() (vtable +0x20)
+        a.mov_r_mem(EAX, EDI, 0)
+        a.push_r(EDI)
+        a.call_mem(EAX, 0x20)
+        # dev->SetCooperativeLevel(Device.m_hWnd, DISCL_NONEXCLUSIVE | DISCL_FOREGROUND = 6) (+0x34)
+        a.mov_r_mem(EDX, EBX, XR3DA_DEV_HWND - uwld_va)
+        a.mov_r_mem(EAX, EDI, 0)
+        a.push_imm8(0x06)
+        a.push_r(EDX)
+        a.push_r(EDI)
+        a.call_mem(EAX, 0x34)
+        a.label(skip_lbl)
+    # ClipCursor(NULL)
+    a.mov_r_mem(EAX, EBX, LD_OFF_FN_CLIPCURSOR)
+    a.test_rr(EAX, EAX)
+    a.je("bd_done")
+    a.push_imm8(0)
+    a.call_r(EAX)
+    a.label("bd_done")
+    a.pop_r(EDI)
+    a.pop_r(EBX)
+    a.ret()
+
+    # Hook_Borderless_Activate (replaces 34 bytes at 0x00424E39 in CInput::OnAppActivate)
+    # Entry: esi = CInput + 0x04 -> [esi+0xc]=pMouse, [esi+0x10]=pKeyboard
+    # Restores DISCL_EXCLUSIVE | DISCL_FOREGROUND (unless -i disabled exclusive input) and Acquire()s.
+    a.align(16)
+    a.label("Hook_Borderless_Activate")
+    a.push_r(EBX)
+    a.push_r(EDI)
+    a.emit_pic_base(EBX, "ld_pic")
+    a.mov_r_imm32(ECX, 0x05)                       # DISCL_EXCLUSIVE (1) | DISCL_FOREGROUND (4)
+    a.cmp_mem8_imm8(EBX, XR3DA_INPUT_EXCL - uwld_va, 0)
+    a.jne("ba_excl")
+    a.mov_r_imm32(ECX, 0x06)                       # respect -i non-exclusive debug flag
+    a.label("ba_excl")
+    a.push_r(ECX)                                  # [esp] = coop_flags
+    for idx, dev_off in enumerate((0x0C, 0x10)):
+        skip_lbl = f"ba_skip_{idx}"
+        a.mov_r_mem(EDI, ESI, dev_off)
+        a.test_rr(EDI, EDI)
+        a.je(skip_lbl)
+        # dev->Unacquire() first so SetCooperativeLevel always succeeds
+        a.mov_r_mem(EAX, EDI, 0)
+        a.push_r(EDI)
+        a.call_mem(EAX, 0x20)
+        # dev->SetCooperativeLevel(Device.m_hWnd, coop_flags)
+        a.mov_r_esp(ECX, 0)
+        a.mov_r_mem(EDX, EBX, XR3DA_DEV_HWND - uwld_va)
+        a.mov_r_mem(EAX, EDI, 0)
+        a.push_r(ECX)
+        a.push_r(EDX)
+        a.push_r(EDI)
+        a.call_mem(EAX, 0x34)
+        # dev->Acquire() (vtable +0x1C)
+        a.mov_r_mem(EAX, EDI, 0)
+        a.push_r(EDI)
+        a.call_mem(EAX, 0x1C)
+        a.label(skip_lbl)
+    a.pop_r(ECX)
+    a.pop_r(EDI)
+    a.pop_r(EBX)
+    a.ret()
+
+    # Hook_Borderless_OnFrame (replaces 30 bytes at 0x00425033 in CInput::OnFrame)
+    # Entry: edi = CInput*, ebx = 0, eax = dwCurTime
+    # Skips KeyUpdate & MouseUpdate completely while Device.b_is_Active == 0 so X-Ray never
+    # spams DirectInput Acquire() or steals input while tabbed out!
+    a.align(16)
+    a.label("Hook_Borderless_OnFrame")
+    a.mov_mem_r(EDI, 0xBB4, EAX)                   # preserve dwCurTime update
+    a.emit_pic_base(EAX, "ld_pic")
+    a.cmp_mem32_imm8(EAX, XR3DA_DEV_ACTIVE - uwld_va, 0)
+    a.je("bof_done")
+    a.cmp_mem32_imm8(EDI, 0x14, 0)                 # pKeyboard != NULL
+    a.je("bof_mouse")
+    a.mov_rr(ECX, EDI)
+    a.call(XR3DA_FN_KEYUPDATE)
+    a.label("bof_mouse")
+    a.cmp_mem32_imm8(EDI, 0x10, 0)                 # pMouse != NULL
+    a.je("bof_done")
+    a.mov_rr(ECX, EDI)
+    a.call(XR3DA_FN_MOUSEUPDATE)
+    a.label("bof_done")
+    a.ret()
+
+    # Hook_Borderless_HideCursor (replaces 8 bytes at 0x00484192 in CRenderDevice::OnWM_Activate)
+    # Loops ShowCursor(FALSE) until cursor count < 0 (capped at 16 iterations).
+    a.align(16)
+    a.label("Hook_Borderless_HideCursor")
+    a.push_r(EBX)
+    a.push_r(ESI)
+    a.emit_pic_base(EBX, "ld_pic")
+    a.mov_r_imm32(ESI, 16)
+    a.label("bhc_loop")
+    a.push_imm8(0)
+    a.call_mem(EBX, XR3DA_IAT_SHOWCURSOR - uwld_va)
+    a.cmp_r_imm8(EAX, 0)
+    a.jl("bhc_done")
+    a.sub_r_imm8(ESI, 1)
+    a.jne("bhc_loop")
+    a.label("bhc_done")
+    a.pop_r(ESI)
+    a.pop_r(EBX)
+    a.ret()
+
+    # Hook_Borderless_ShowCursor (replaces 8 bytes at 0x004841A7 in CRenderDevice::OnWM_Activate)
+    # Loops ShowCursor(TRUE) until cursor count >= 0 (fixes vanilla -2 count leak!) and calls ClipCursor(NULL).
+    a.align(16)
+    a.label("Hook_Borderless_ShowCursor")
+    a.push_r(EBX)
+    a.push_r(ESI)
+    a.emit_pic_base(EBX, "ld_pic")
+    a.mov_r_imm32(ESI, 16)
+    a.label("bsc_loop")
+    a.push_imm8(1)
+    a.call_mem(EBX, XR3DA_IAT_SHOWCURSOR - uwld_va)
+    a.cmp_r_imm8(EAX, 0)
+    a.jge("bsc_clip")
+    a.sub_r_imm8(ESI, 1)
+    a.jne("bsc_loop")
+    a.label("bsc_clip")
+    a.mov_r_mem(EAX, EBX, LD_OFF_FN_CLIPCURSOR)
+    a.test_rr(EAX, EAX)
+    a.je("bsc_done")
+    a.push_imm8(0)
+    a.call_r(EAX)
+    a.label("bsc_done")
+    a.pop_r(ESI)
+    a.pop_r(EBX)
     a.ret()
 
     code = a.finalize()
@@ -1398,7 +1564,7 @@ def patch_xr3da(
             pe.patch_va(va, expected, repl, desc)
 
     if borderless:
-        # 1. CRenderDevice::Initialize: WS_CAPTION -> WS_POPUP + SetProcessDPIAware()
+        # 1. CRenderDevice::Initialize: WS_CAPTION -> WS_POPUP + SetProcessDPIAware() + ClipCursor lookup
         pe.patch_va(
             0x00484FA0,
             bytes.fromhex("c7 06 00 00 c0 00"),
@@ -1418,6 +1584,50 @@ def patch_xr3da(
             bytes.fromhex("68 00 00 ca 10"),
             bytes.fromhex("68 00 00 00 90"),
             "CHW::updateWindowProps AdjustWindowRect WS_POPUP|WS_VISIBLE",
+        )
+        # 4. CInput::OnAppActivate: restore DISCL_EXCLUSIVE|DISCL_FOREGROUND before Acquire()
+        pe.patch_va(
+            0x00424E39,
+            bytes.fromhex(
+                "83 7e 0c 00 74 0b 8b 46 0c 8b 08 8b 51 1c 50 ff d2 "
+                "83 7e 10 00 74 0b 8b 46 10 8b 08 8b 51 1c 50 ff d2"
+            ),
+            make_call_patch(0x00424E39, labels["Hook_Borderless_Activate"], 34),
+            "CInput::OnAppActivate exclusive restore + Acquire",
+        )
+        # 5. CInput::OnAppDeactivate: Unacquire + DISCL_NONEXCLUSIVE + ClipCursor(NULL)
+        pe.patch_va(
+            0x00424F48,
+            bytes.fromhex(
+                "83 7e 08 00 74 0b 8b 46 08 8b 08 8b 51 20 50 ff d2 "
+                "83 7e 0c 00 74 0b 8b 46 0c 8b 08 8b 51 20 50 ff d2"
+            ),
+            make_call_patch(0x00424F48, labels["Hook_Borderless_Deactivate"], 34),
+            "CInput::OnAppDeactivate non-exclusive + ClipCursor(NULL)",
+        )
+        # 6. CInput::OnFrame: skip KeyUpdate/MouseUpdate while tabbed out (b_is_Active == 0)
+        pe.patch_va(
+            0x00425033,
+            bytes.fromhex(
+                "39 5f 14 89 87 b4 0b 00 00 74 07 8b cf e8 6b f3 ff ff "
+                "39 5f 10 74 07 8b cf e8 4f f6 ff ff"
+            ),
+            make_call_patch(0x00425033, labels["Hook_Borderless_OnFrame"], 30),
+            "CInput::OnFrame active-window gate",
+        )
+        # 7. CRenderDevice::OnWM_Activate: balanced ShowCursor(FALSE) on focus
+        pe.patch_va(
+            0x00484192,
+            bytes.fromhex("6a 00 ff 15 2c c3 4c 00"),
+            make_call_patch(0x00484192, labels["Hook_Borderless_HideCursor"], 8),
+            "CRenderDevice::OnWM_Activate HideCursor",
+        )
+        # 8. CRenderDevice::OnWM_Activate: balanced ShowCursor(TRUE) + ClipCursor(NULL) on unfocus
+        pe.patch_va(
+            0x004841A7,
+            bytes.fromhex("6a 01 ff 15 2c c3 4c 00"),
+            make_call_patch(0x004841A7, labels["Hook_Borderless_ShowCursor"], 8),
+            "CRenderDevice::OnWM_Activate ShowCursor + ClipCursor(NULL)",
         )
 
     return bytes(pe.data), uwld_va, labels

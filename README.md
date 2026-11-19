@@ -41,13 +41,17 @@ On any resolution wider than the target UI aspect (default `16:9`), `ui_core` dy
 
 - Hooks `CApplication::load_draw_internal` (`0x00412BFB` + 6 X-scale sites) to preserve `4:3` proportions for loading art, the progress bar, and level logos, clearing the backbuffer to solid black so the ultrawide wings have zero visual artifacts.
 
-### 3. Native Borderless Fullscreen + DPI Awareness (`bin\XR_3DA.exe` → `.uwld` + 3 callsites)
+### 3. Native Borderless Fullscreen + DPI Awareness + Clean Alt+Tab Unlock (`bin\XR_3DA.exe` → `.uwld` + 8 callsites)
 
 Turns X-Ray's windowed mode (`rs_fullscreen off`) into **true Borderless Fullscreen**, while keeping Exclusive Fullscreen (`rs_fullscreen on`) completely intact so you can switch modes anytime in-game under **Options → Video → Full screen**:
 
-- **`CRenderDevice::Initialize` (`0x00484FA0` → `Hook_Borderless_Init`)**: Replaces initial `WS_CAPTION` (`0x00C00000`) with `WS_POPUP` (`0x80000000`) to eliminate startup border flash, and dynamically resolves and invokes `user32.dll!SetProcessDPIAware()` so borderless windows map `1:1` to physical pixels even when Windows display scaling is `> 100%` (125%, 150%, 200%).
+- **`CRenderDevice::Initialize` (`0x00484FA0` → `Hook_Borderless_Init`)**: Replaces initial `WS_CAPTION` (`0x00C00000`) with `WS_POPUP` (`0x80000000`) to eliminate startup border flash, invokes `user32.dll!SetProcessDPIAware()` so borderless windows map `1:1` to physical pixels even when Windows display scaling is `> 100%`, and resolves `user32.dll!ClipCursor`.
 - **`CHW::updateWindowProps` (`0x0048B591` & `0x0048B60D`)**: Replaces windowed style `0x10CA0000` (`WS_VISIBLE | WS_BORDER | WS_DLGFRAME | WS_SYSMENU | WS_MINIMIZEBOX`) with `0x90000000` (`WS_POPUP | WS_VISIBLE`) for both `SetWindowLongA` and `AdjustWindowRect`. Combined with X-Ray's existing `SetWindowPos(HWND_TOP, 0, 0, W, H, SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOCOPYBITS)`, this fills the entire primary monitor seamlessly over the taskbar while allowing instant Alt+Tab with zero monitor mode-switching.
-- **Multi-monitor mouse lock**: X-Ray's `CInput` natively acquires DirectInput8 mouse with `DISCL_EXCLUSIVE | DISCL_FOREGROUND` even when `rs_fullscreen off`, and automatically calls `Unacquire()` / `Acquire()` on `WM_ACTIVATE`, so the cursor stays locked inside the game during play (no drift onto secondary monitors) and releases instantly on Alt+Tab.
+- **Clean Alt+Tab mouse release & multi-monitor lock (`CInput` & `CRenderDevice::OnWM_Activate`)**:
+  - **`CInput::OnAppDeactivate` (`0x00424F48`)**: After `Unacquire()`, drops both DirectInput8 devices (`pMouse`, `pKeyboard`) to `DISCL_NONEXCLUSIVE | DISCL_FOREGROUND` and calls `ClipCursor(NULL)` so the cursor immediately unlocks across all monitors.
+  - **`CInput::OnAppActivate` (`0x00424E39`)**: Restores `DISCL_EXCLUSIVE | DISCL_FOREGROUND` before `Acquire()` when returning to the game so the mouse stays locked inside the game monitor during play (no drift onto secondary monitors).
+  - **`CInput::OnFrame` (`0x00425033`)**: Gates `KeyUpdate()` and `MouseUpdate()` on `Device.b_is_Active` (`0x0050BD9C`), preventing vanilla X-Ray from spamming `pMouse->Acquire()` in the background while tabbed out.
+  - **`CRenderDevice::OnWM_Activate` (`0x00484192` & `0x004841A7`)**: Balances Windows' `ShowCursor` reference counter (fixing vanilla's extra `ShowCursor(FALSE)` leak in `updateWindowProps`) and calls `ClipCursor(NULL)` on deactivate.
 
 | In-Game Setting (`user.ltx`) | Behavior (when patched) |
 |---|---|
@@ -109,8 +113,8 @@ python verify_patch.py
 
 `verify_patch.py` performs an in-memory audit from the clean `.orig.bak` binaries:
 1. Disassembles 100% of `.uwui` and `.uwld` to verify zero invalid opcodes or truncated encodings.
-2. Audits all **41 patched callsites** (31 in `xrGame.dll`, 10 in `XR_3DA.exe`) for exact instruction boundary re-synchronization and **zero stale `.reloc` entries**.
-3. Verifies embedded `.uwld` flags and strings (`user32.dll`, `SetProcessDPIAware`).
+2. Audits all **46 patched callsites** (31 in `xrGame.dll`, 15 in `XR_3DA.exe`) for exact instruction boundary re-synchronization and **zero stale `.reloc` entries**.
+3. Verifies embedded `.uwld` flags and strings (`user32.dll`, `SetProcessDPIAware`, `ClipCursor`).
 4. Loads both patched binaries through Windows' native `LoadLibraryExW(..., LOAD_LIBRARY_AS_IMAGE_RESOURCE)` PE loader.
 
 ---
